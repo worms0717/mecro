@@ -107,11 +107,11 @@ SKILL_POSITIONS = {
 
 # 스킬 준비 템플릿 매핑 (element -> 리스트 of 준비 템플릿 파일명)
 SKILL_SEQUENCE = {
-    "불":   ["스킬1_ready.png", "스킬2_ready.png", "스킬3_ready.png"],
-    "물":   ["스킬4_ready.png", "스킬5_ready.png", "스킬6_ready.png"],
+    "불":   [],
+    "물":   [],
     "땅":   ["에반스킬1-1.png", "레이첼스킬2-1.png", "제이븐스킬1-1.png", "유리스킬2-1.png", "유이스킬2-1.png", "제이븐스킬1-1.png"],
     "빛":   ["조커스킬2-1.png", "에반스킬1-1.png", "클로에스킬2-1.png", "유이스킬2-1.png"],
-    "암흑": ["스킬11_ready.png", "스킬12_ready.png"],
+    "암흑": [],
     "골드": []
 }
 
