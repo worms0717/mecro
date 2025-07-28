@@ -4,39 +4,54 @@ Seven_Mecro_control_R3.py · 2025‑07‑13  R8
 ────────────────────────────────────────────────────────
 1) 자동 분기  (쫄작완료 ↔ 쫄작스타터)
 2) 단계별 탭 시퀀스 + 템플릿 다중 매칭 지원
-3) DEBUG = True  →  실시간 점수·좌표 로그 + 10초마다 종합 리포트
+3) --debug 옵션으로 실시간 점수·좌표 로그 출력
 4) **NEW** 2단계 이후 동일 이미지가 10회 연속 감지되면 복구 좌표(1730,173) 탭 후
    시퀀스를 처음부터 재시작 (루프 교착 해소)
 """
 
 # ────────────────────────── 기본 설정
-import os, re, sys, time, shutil, subprocess
+import argparse
+import os
+import re
+import sys
+import time
+import shutil
+import subprocess
 from pathlib import Path
-from typing import List, Tuple, Dict, Union
+from typing import List, Tuple, Dict, Union, Callable
+from dataclasses import dataclass, field
 from datetime import datetime, date
-import cv2, numpy as np, psutil
+import cv2
+import numpy as np
+import psutil
 from ppadb.client import Client
 import json
 
-BS_INSTALL  = Path(r"C:/Program Files/BlueStacks_nxt")
-TEMPL_DIR   = Path(__file__).parent / "templates"
+BS_INSTALL = Path(r"C:/Program Files/BlueStacks_nxt")
+TEMPL_DIR = Path(__file__).parent / "templates"
 
-DEBUG            = True        # 실시간 로그 on/off
-SKILL_LOG        = True
-MATCH_TH         = 0.75        # 시퀀스 단계 임계
-SCAN_TH          = 0.70        # 분기 탐색 임계
-LOOP_DELAY       = 0.30        # 매 프레임 대기
-REPORT_INTERVAL  = 10          # 종합 리포트 주기(초)
 
-STUCK_REPEAT     = 10          # 동일 이미지 연속 감지 횟수(2단계~)
-STUCK_COORD      = (1809, 56) # 복구 탭 좌표
-DEFAULT_COOLDOWN = 6.0 # 스킬 쿨타임(초) – 스킬별로 다를 경우 SKILL_COOLDOWN 사용
-# 하루 최대 입장 횟수 설정
-MAX_DUNGEON_RUNS = 2
+@dataclass
+class GameConfig:
+    """실행 중 변경 가능한 설정 값 모음."""
+
+    debug: bool = True
+    skill_log: bool = True
+    match_th: float = 0.75
+    scan_th: float = 0.70
+    loop_delay: float = 0.30
+    report_interval: int = 10
+    stuck_repeat: int = 10
+    stuck_coord: Tuple[int, int] = (1809, 56)
+    default_cooldown: float = 6.0
+    max_dungeon_runs: int = 2
+
+
+CFG = GameConfig()
 
 ADB_CANDS = [
     Path(r"C:/Android/platform-tools/adb.exe"),
-    Path.home() / "AppData/Local/Android/Sdk/platform-tools/adb.exe"
+    Path.home() / "AppData/Local/Android/Sdk/platform-tools/adb.exe",
 ]
 
 _growth_state = {"date": date.today().isoformat(), "count": 0}
@@ -237,11 +252,16 @@ def match(screen: np.ndarray, tpl: np.ndarray,
 
 # 일일 입장 횟수 체크 및 증가 함수
 def check_and_increment_dungeon_count():
-    today = datetime.today().date()
-    count = dungeon_run_counts.get(today, 0)
-    if count >= MAX_DUNGEON_RUNS:
-        raise RuntimeError(f"하루 최대 {MAX_DUNGEON_RUNS}회 입장 초과")
-    dungeon_run_counts[today] = count + 1
+    _reset_growth_counter()
+    if _growth_state["count"] >= CFG.max_dungeon_runs:
+        raise RuntimeError(
+            f"하루 최대 {CFG.max_dungeon_runs}회 입장 초과"
+        )
+    _growth_state["count"] += 1
+    if CFG.debug:
+        print(
+            f"[LIMIT] 성장던전 실행 횟수 {_growth_state['count']}/{CFG.max_dungeon_runs} (오늘)"
+        )
 
 # ────────────────────────── 전역 성장던전 카운터
 
@@ -253,13 +273,8 @@ def _reset_growth_counter():
         
 def can_enter_growth() -> bool:
     _reset_growth_counter()
-    return _growth_state["count"] < MAX_DUNGEON_RUNS
+    return _growth_state["count"] < CFG.max_dungeon_runs
 
-def register_growth_run():
-    _reset_growth_counter()
-    _growth_state["count"] += 1
-    if DEBUG:
-        print(f"[LIMIT] 성장던전 실행 횟수 {_growth_state['count']}/{MAX_DUNGEON_RUNS} (오늘)")
         
 # ────────────────────────── 공통: 스테이지 클리어 대기 ────────────────
 
@@ -269,9 +284,9 @@ def wait_for_stage_clear(bs: BlueStacks, timeout: float = 120) -> bool:
     t0 = time.time()
     while time.time() - t0 < timeout:
         frame = bs.screenshot()
-        if clear_tpl is not None and match(frame, clear_tpl)[0] >= MATCH_TH:
+        if clear_tpl is not None and match(frame, clear_tpl)[0] >= CFG.match_th:
             
-            if DEBUG:
+            if CFG.debug:
                 print("[INFO] 스테이지 클리어 감지")
             return True
         time.sleep(0.5)
@@ -288,8 +303,8 @@ def use_skill_loop(bs: BlueStacks, element: str):
 
     while True:
         frame = bs.screenshot()
-        if match(frame, clear_tpl)[0] >= MATCH_TH:
-            if DEBUG:
+        if match(frame, clear_tpl)[0] >= CFG.match_th:
+            if CFG.debug:
                 print("[INFO] 성장 던전 클리어 감지, 스킬 루프 종료")
             return
 
@@ -297,14 +312,14 @@ def use_skill_loop(bs: BlueStacks, element: str):
         now = time.time()
 
         for name, tpl in tpl_list:
-            cooldown = SKILL_COOLDOWN.get(name, DEFAULT_COOLDOWN)
+            cooldown = SKILL_COOLDOWN.get(name, CFG.default_cooldown)
             if now - last_tap[name] < cooldown:
                 continue
             sc, pt = match(roi, tpl)
-            if sc >= MATCH_TH:
+            if sc >= CFG.match_th:
                 bs.tap((pt[0], pt[1] + ROI_Y0))
                 last_tap[name] = now
-                if SKILL_LOG:
+                if CFG.skill_log:
                     print(f"[SKILL] {name} fired score={sc:.2f} cd={cooldown}s")
                 time.sleep(0.15)
 
@@ -360,8 +375,6 @@ SEQS: Dict[str, List[Dict]] = {
 # 템플릿 캐시 (lazy)
 TPL: Dict[str, np.ndarray] = {}
 
-# 일별 입장 횟수 기록 (date -> count)
-dungeon_run_counts = {}
 
 # 분기용 (전체 화면 ROI)
 # # ───────────── 분기용 매핑 ─────────────
@@ -474,7 +487,7 @@ def enter_daily_dungeon(bs):
         # ① 던전 버튼 탐지 → 탭
         frame = bs.screenshot()
         sc, pt = match(frame, tpl)
-        if sc < MATCH_TH:
+        if sc < CFG.match_th:
             raise RuntimeError(f"{tpl_name} 탐지 실패(점수 {sc:.2f})")
         bs.tap(pt)
         time.sleep(0.4)
@@ -484,7 +497,7 @@ def enter_daily_dungeon(bs):
         for _ in range(20):
             frame = bs.screenshot()
             sc, pt = match(frame, start_tpl)
-            if sc >= MATCH_TH:
+            if sc >= CFG.match_th:
                 bs.tap(pt)
                 break
             time.sleep(0.2)
@@ -511,23 +524,23 @@ def use_skill_sequence(bs, element):
             for _ in range(10):           # 최대 10프레임 시도
                 frame = bs.screenshot()
                 sc, pt = match(frame, tpl)
-                if sc >= MATCH_TH:
+                if sc >= CFG.match_th:
                     bs.tap(pt)
                     break
                 time.sleep(0.1)
         time.sleep(0.2)                   # 스킬 간 짧은 딜레이
 
-def is_stuck(dev, tpl_names: List[str], repeat: int = STUCK_REPEAT) -> bool:
+def is_stuck(dev, tpl_names: List[str], repeat: int = CFG.stuck_repeat) -> bool:
     """동일 템플릿이 repeat회 연속 감지되면 True"""
     for cnt in range(repeat):
-        time.sleep(LOOP_DELAY)
+        time.sleep(CFG.loop_delay)
         img_bgr = cv2.imdecode(np.frombuffer(dev.screencap(), np.uint8), cv2.IMREAD_COLOR)
         best_sc = 0.0
         for fn in tpl_names:
             sc, _ = match(img_bgr, load_tpl(fn), roi_y0=0, scales=(1.0,))
             best_sc = max(best_sc, sc)
-        if best_sc < MATCH_TH:
-            if DEBUG:
+        if best_sc < CFG.match_th:
+            if CFG.debug:
                 print(f"    ↪ STUCK check break @{cnt+1}/{repeat} ({best_sc:.2f})        ")
             return False  # 정상 전환
     return True  # repeat 모두 통과 → 교착
@@ -596,8 +609,8 @@ def run_seq(bs: "BlueStacks", seq_name: str, start_idx: int = 0) -> bool:
                 scores.append(s)
                 coords.append(c)
 
-            ok = all(s >= MATCH_TH for s in scores) if require_all \
-                 else any(s >= MATCH_TH for s in scores)
+            ok = all(s >= CFG.match_th for s in scores) if require_all \
+                 else any(s >= CFG.match_th for s in scores)
 
             if ok:
                 if tap:
@@ -612,7 +625,7 @@ def run_seq(bs: "BlueStacks", seq_name: str, start_idx: int = 0) -> bool:
                     dev.shell("input keyevent 111")
                     time.sleep(1)
                     return False            # 시퀀스 실패 신고
-                time.sleep(LOOP_DELAY)
+                time.sleep(CFG.loop_delay)
 
     print(f"[SEQ] {seq_name} 완료\n")
     return True
@@ -629,7 +642,7 @@ def decide_sequence(bs: BlueStacks):
         # ① 메인 템플릿 일치율 확인
         tpl_main = load_tpl(item["tpl"])
         sc, pt = match(frame, tpl_main, scales=(1.0,))
-        if sc < SCAN_TH:
+        if sc < CFG.scan_th:
             continue
 
         seq  = item["seq"]
@@ -638,12 +651,12 @@ def decide_sequence(bs: BlueStacks):
         # ② 성장던전 분기 – 하루 횟수·차단 템플릿 검사
         if seq == "성장던전 자동 사냥":
             if not can_enter_growth():
-                if DEBUG:
+                if CFG.debug:
                     print("[LIMIT] 성장던전 하루 제한 초과 – 건너뜀")
                 continue
             # 차단 아이콘(쫄작완료·쫄작스타터) 존재 시 진입 금지
-            if any(match(frame, load_tpl(bt))[0] >= SCAN_TH for bt in BLOCK_TPLS):
-                if DEBUG:
+            if any(match(frame, load_tpl(bt))[0] >= CFG.scan_th for bt in BLOCK_TPLS):
+                if CFG.debug:
                     print("[BRANCH] 성장던전 차단 – 차단 템플릿 감지")
                 continue
 
@@ -668,9 +681,26 @@ def debug_report(img: np.ndarray, *, roi_y0: int = 0):
         print(f"  {name:<15} → {sc:.3f} @ {coord}")
     print("[END REPORT]\n")
 
+
+def parse_args() -> argparse.Namespace:
+    """CLI 인수 파싱"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--debug", action="store_true", help="디버그 로그 출력")
+    parser.add_argument(
+        "--max-runs",
+        type=int,
+        default=CFG.max_dungeon_runs,
+        help="하루 최대 던전 입장 횟수",
+    )
+    return parser.parse_args()
+
 # ────────────────────────── MAIN 루프
 
 def main() -> None:
+    args = parse_args()
+    CFG.debug = args.debug
+    CFG.max_dungeon_runs = args.max_runs
+
     bs = BlueStacks()          # 블루스택 ADB 연결 래퍼
     print("[INFO] Seven_Mecro 시작")
 
@@ -678,7 +708,7 @@ def main() -> None:
         # 1) 현재 화면으로부터 실행할 시퀀스 결정
         seq_name, skip, _ = decide_sequence(bs)
         if seq_name is None:
-            time.sleep(LOOP_DELAY)      # 아무 조건도 못 찾음 → 재시도
+            time.sleep(CFG.loop_delay)      # 아무 조건도 못 찾음 → 재시도
             continue
 
         # 2) 시퀀스 실행
