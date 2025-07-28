@@ -252,11 +252,16 @@ def match(screen: np.ndarray, tpl: np.ndarray,
 
 # 일일 입장 횟수 체크 및 증가 함수
 def check_and_increment_dungeon_count():
-    today = datetime.today().date()
-    count = dungeon_run_counts.get(today, 0)
-    if count >= CFG.max_dungeon_runs:
-        raise RuntimeError(f"하루 최대 {CFG.max_dungeon_runs}회 입장 초과")
-    dungeon_run_counts[today] = count + 1
+    _reset_growth_counter()
+    if _growth_state["count"] >= CFG.max_dungeon_runs:
+        raise RuntimeError(
+            f"하루 최대 {CFG.max_dungeon_runs}회 입장 초과"
+        )
+    _growth_state["count"] += 1
+    if CFG.debug:
+        print(
+            f"[LIMIT] 성장던전 실행 횟수 {_growth_state['count']}/{CFG.max_dungeon_runs} (오늘)"
+        )
 
 # ────────────────────────── 전역 성장던전 카운터
 
@@ -270,13 +275,6 @@ def can_enter_growth() -> bool:
     _reset_growth_counter()
     return _growth_state["count"] < CFG.max_dungeon_runs
 
-def register_growth_run():
-    _reset_growth_counter()
-    _growth_state["count"] += 1
-    if CFG.debug:
-        print(
-            f"[LIMIT] 성장던전 실행 횟수 {_growth_state['count']}/{CFG.max_dungeon_runs} (오늘)"
-        )
         
 # ────────────────────────── 공통: 스테이지 클리어 대기 ────────────────
 
@@ -377,8 +375,6 @@ SEQS: Dict[str, List[Dict]] = {
 # 템플릿 캐시 (lazy)
 TPL: Dict[str, np.ndarray] = {}
 
-# 일별 입장 횟수 기록 (date -> count)
-dungeon_run_counts = {}
 
 # 분기용 (전체 화면 ROI)
 # # ───────────── 분기용 매핑 ─────────────
